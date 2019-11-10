@@ -9,12 +9,16 @@ import numpy as np
 import tensorflow as tf
 
 model = tf.keras.models.Sequential([
-    tf.keras.layers.Dense(10, activation='relu', input_shape = (4,)), # bird y, bird dy, pipe1 d, pipe1 h todo:, pipe2 d, pipe2 h
+    tf.keras.layers.Dense(100, activation='relu', input_shape = (4,)), # bird y, bird dy, pipe1 d, pipe1 h todo:, pipe2 d, pipe2 h
     tf.keras.layers.Dense(2) # q of flap and no flap
 ])
 
-sgd = tf.keras.optimizers.SGD(lr=0.000001)
+
+sgd = tf.keras.optimizers.SGD(lr=0.0000001)
 model.compile(optimizer=sgd, loss='mse')
+
+history = []
+gamma = .8
 
 FPS = 1000
 SCREENWIDTH  = 288
@@ -106,47 +110,51 @@ def main():
     SOUNDS['wing']   = pygame.mixer.Sound('assets/audio/wing' + soundExt)
 
     while True:
-        # select random background sprites
-        randBg = random.randint(0, len(BACKGROUNDS_LIST) - 1)
-        IMAGES['background'] = pygame.image.load(BACKGROUNDS_LIST[randBg]).convert()
+        
+        for _ in range(100):
+            # select random background sprites
+            randBg = random.randint(0, len(BACKGROUNDS_LIST) - 1)
+            IMAGES['background'] = pygame.image.load(BACKGROUNDS_LIST[randBg]).convert()
 
-        # select random player sprites
-        randPlayer = random.randint(0, len(PLAYERS_LIST) - 1)
-        IMAGES['player'] = (
-            pygame.image.load(PLAYERS_LIST[randPlayer][0]).convert_alpha(),
-            pygame.image.load(PLAYERS_LIST[randPlayer][1]).convert_alpha(),
-            pygame.image.load(PLAYERS_LIST[randPlayer][2]).convert_alpha(),
-        )
+            # select random player sprites
+            randPlayer = random.randint(0, len(PLAYERS_LIST) - 1)
+            IMAGES['player'] = (
+                pygame.image.load(PLAYERS_LIST[randPlayer][0]).convert_alpha(),
+                pygame.image.load(PLAYERS_LIST[randPlayer][1]).convert_alpha(),
+                pygame.image.load(PLAYERS_LIST[randPlayer][2]).convert_alpha(),
+            )
 
-        # select random pipe sprites
-        pipeindex = random.randint(0, len(PIPES_LIST) - 1)
-        IMAGES['pipe'] = (
-            pygame.transform.flip(
-                pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(), False, True),
-            pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(),
-        )
+            # select random pipe sprites
+            pipeindex = random.randint(0, len(PIPES_LIST) - 1)
+            IMAGES['pipe'] = (
+                pygame.transform.flip(
+                    pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(), False, True),
+                pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(),
+            )
 
-        # hismask for pipes
-        HITMASKS['pipe'] = (
-            getHitmask(IMAGES['pipe'][0]),
-            getHitmask(IMAGES['pipe'][1]),
-        )
+            # hismask for pipes
+            HITMASKS['pipe'] = (
+                getHitmask(IMAGES['pipe'][0]),
+                getHitmask(IMAGES['pipe'][1]),
+            )
 
-        # hitmask for player
-        HITMASKS['player'] = (
-            getHitmask(IMAGES['player'][0]),
-            getHitmask(IMAGES['player'][1]),
-            getHitmask(IMAGES['player'][2]),
-        )
+            # hitmask for player
+            HITMASKS['player'] = (
+                getHitmask(IMAGES['player'][0]),
+                getHitmask(IMAGES['player'][1]),
+                getHitmask(IMAGES['player'][2]),
+            )
 
-        #movementInfo = showWelcomeAnimation()
-        movementInfo = {
-                    'playery': int((SCREENHEIGHT - IMAGES['player'][0].get_height()) / 2),
-                    'basex': 0,
-                    'playerIndexGen': cycle([0, 1, 2, 1]),
-                }
-        crashInfo = mainGame(movementInfo)
-        #showGameOverScreen(crashInfo)
+            #movementInfo = showWelcomeAnimation()
+            movementInfo = {
+                        'playery': int((SCREENHEIGHT - IMAGES['player'][0].get_height()) / 2),
+                        'basex': 0,
+                        'playerIndexGen': cycle([0, 1, 2, 1]),
+                    }
+            crashInfo = mainGame(movementInfo)
+            #showGameOverScreen(crashInfo)
+            
+        train(history[-10000:])
 
 
 def showWelcomeAnimation():
@@ -201,6 +209,17 @@ def showWelcomeAnimation():
         pygame.display.update()
         FPSCLOCK.tick(FPS)
 
+def train(history):
+    last_state, last_action, reward, state, action = zip(*history)
+    y = model.predict(np.array(last_state))
+    y[:,last_action] = reward + gamma * model.predict(np.array(state))[:,action]
+
+    #y = np.zeros(2)
+    #y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
+    #q_last = model.predict(np.array([last_state]))
+    #y[1-last_action] = q_last[0, 1-last_action] 
+    model.fit(x=np.array(last_state), y=np.array(y))
+
 
 def mainGame(movementInfo):
     score = playerIndex = loopIter = 0
@@ -244,9 +263,7 @@ def mainGame(movementInfo):
     state = None
     last_action = None
     action = None
-    history = []
 
-    gamma = .6
     while True:
         for event in pygame.event.get():
             if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
@@ -277,7 +294,6 @@ def mainGame(movementInfo):
             reward = -5
 
         
-        print(state)
         comingPipes = filter(lambda pipe: pipe['x'] > 0, lowerPipes)
         nextPipe = list(comingPipes)[0] 
 
@@ -285,26 +301,18 @@ def mainGame(movementInfo):
         state = [playery/100., playerVelY/10., nextPipe['x']/100., nextPipe['y']/100.]
         last_action = action
         q = model.predict(np.array([state]))
-        print("Q ", q)
     
         action = int(q[0][0] < q[0][1])
         if random.random() >= 0.9:
             action = 1 - action
-        history.append((state, last_state, action, last_action))
+
+        if last_action is not None:
+            history.append((last_state, last_action, reward, state, action))
             
         if action:
             playerVelY = playerFlapAcc
             playerFlapped = True
 
-        if last_state is not None:
-            y = model.predict(np.array([last_state]))[0,:]
-            y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
-
-            #y = np.zeros(2)
-            #y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
-            #q_last = model.predict(np.array([last_state]))
-            #y[1-last_action] = q_last[0, 1-last_action] 
-            model.fit(x=np.array([last_state]), y=np.array([y]))
 
         
         

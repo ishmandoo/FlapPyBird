@@ -6,17 +6,30 @@ import pygame
 from pygame.locals import *
 
 import numpy as np
-import tensorflow as tf
+import torch
+from torch import nn
 
-model = tf.keras.models.Sequential([
-    tf.keras.layers.Dense(10, activation='relu', input_shape = (4,)), # bird y, bird dy, pipe1 d, pipe1 h todo:, pipe2 d, pipe2 h
-    tf.keras.layers.Dense(2) # q of flap and no flap
-])
 
-sgd = tf.keras.optimizers.SGD(lr=0.000001)
-model.compile(optimizer=sgd, loss='mse')
+from buffer import Buffer
+
+model = nn.Sequential(
+    nn.Linear(5, 8),
+    nn.ReLU(),
+    nn.Linear(8, 8),
+    nn.ReLU(),
+    nn.Linear(8, 2)
+)
+
+optimizer = torch.optim.Adam(model.parameters())
+#optimizer = torch.optim.Adamax(model.parameters())
+#optimizer = torch.optim.SGD(model.parameters(), lr=0.01) #, momentum=0.9, decay=1e-6, nesterov=True)
+
+
+buffer = Buffer(100000)
+gamma = .95
 
 FPS = 1000
+draw = False
 SCREENWIDTH  = 288
 SCREENHEIGHT = 512
 PIPEGAPSIZE  = 100 # gap between upper and lower part of pipe
@@ -106,47 +119,54 @@ def main():
     SOUNDS['wing']   = pygame.mixer.Sound('assets/audio/wing' + soundExt)
 
     while True:
-        # select random background sprites
-        randBg = random.randint(0, len(BACKGROUNDS_LIST) - 1)
-        IMAGES['background'] = pygame.image.load(BACKGROUNDS_LIST[randBg]).convert()
+        
+        scores = []
+        for _ in range(20):
+            # select random background sprites
+            randBg = random.randint(0, len(BACKGROUNDS_LIST) - 1)
+            IMAGES['background'] = pygame.image.load(BACKGROUNDS_LIST[randBg]).convert()
 
-        # select random player sprites
-        randPlayer = random.randint(0, len(PLAYERS_LIST) - 1)
-        IMAGES['player'] = (
-            pygame.image.load(PLAYERS_LIST[randPlayer][0]).convert_alpha(),
-            pygame.image.load(PLAYERS_LIST[randPlayer][1]).convert_alpha(),
-            pygame.image.load(PLAYERS_LIST[randPlayer][2]).convert_alpha(),
-        )
+            # select random player sprites
+            randPlayer = random.randint(0, len(PLAYERS_LIST) - 1)
+            IMAGES['player'] = (
+                pygame.image.load(PLAYERS_LIST[randPlayer][0]).convert_alpha(),
+                pygame.image.load(PLAYERS_LIST[randPlayer][1]).convert_alpha(),
+                pygame.image.load(PLAYERS_LIST[randPlayer][2]).convert_alpha(),
+            )
 
-        # select random pipe sprites
-        pipeindex = random.randint(0, len(PIPES_LIST) - 1)
-        IMAGES['pipe'] = (
-            pygame.transform.flip(
-                pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(), False, True),
-            pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(),
-        )
+            # select random pipe sprites
+            pipeindex = random.randint(0, len(PIPES_LIST) - 1)
+            IMAGES['pipe'] = (
+                pygame.transform.flip(
+                    pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(), False, True),
+                pygame.image.load(PIPES_LIST[pipeindex]).convert_alpha(),
+            )
 
-        # hismask for pipes
-        HITMASKS['pipe'] = (
-            getHitmask(IMAGES['pipe'][0]),
-            getHitmask(IMAGES['pipe'][1]),
-        )
+            # hismask for pipes
+            HITMASKS['pipe'] = (
+                getHitmask(IMAGES['pipe'][0]),
+                getHitmask(IMAGES['pipe'][1]),
+            )
 
-        # hitmask for player
-        HITMASKS['player'] = (
-            getHitmask(IMAGES['player'][0]),
-            getHitmask(IMAGES['player'][1]),
-            getHitmask(IMAGES['player'][2]),
-        )
+            # hitmask for player
+            HITMASKS['player'] = (
+                getHitmask(IMAGES['player'][0]),
+                getHitmask(IMAGES['player'][1]),
+                getHitmask(IMAGES['player'][2]),
+            )
 
-        #movementInfo = showWelcomeAnimation()
-        movementInfo = {
-                    'playery': int((SCREENHEIGHT - IMAGES['player'][0].get_height()) / 2),
-                    'basex': 0,
-                    'playerIndexGen': cycle([0, 1, 2, 1]),
-                }
-        crashInfo = mainGame(movementInfo)
-        #showGameOverScreen(crashInfo)
+            #movementInfo = showWelcomeAnimation()
+            movementInfo = {
+                        'playery': int((SCREENHEIGHT - IMAGES['player'][0].get_height()) / 2),
+                        'basex': 0,
+                        'playerIndexGen': cycle([0, 1, 2, 1]),
+                    }
+            crashInfo = mainGame(movementInfo)
+            scores.append(crashInfo['score'])
+            #showGameOverScreen(crashInfo)
+            
+        train(buffer.sample(10000))
+        print(max(scores))
 
 
 def showWelcomeAnimation():
@@ -201,8 +221,40 @@ def showWelcomeAnimation():
         pygame.display.update()
         FPSCLOCK.tick(FPS)
 
+def train(batch):
+    batch = batch[:10]
+    print(f'training on {len(batch[0])} samples')
+    states, actions, rewards, next_states, next_action, dones = batch
+    states = torch.tensor(states)
+    actions = torch.tensor(actions)
+    rewards = torch.tensor(rewards, dtype=torch.float32)
+    next_states = torch.tensor(next_states)
+    dones = torch.tensor(dones)
+
+    curr_Q = model(states).gather(1, actions.unsqueeze(1))
+    curr_Q = curr_Q.squeeze(1)
+    next_Q = model(next_states)
+
+    max_next_Q = torch.max(next_Q, 1)[0]
+    expected_Q = rewards + gamma * max_next_Q * (1 - dones)
+
+    loss = nn.MSELoss()(curr_Q, expected_Q.detach())
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    #y = model.predict(np.array(last_state))
+    #y[:,last_action] = reward + gamma * model.predict(np.array(state))[:,action]
+
+    #y = np.zeros(2)
+    #y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
+    #q_last = model.predict(np.array([last_state]))
+    #y[1-last_action] = q_last[0, 1-last_action] 
+    #model.fit(x=np.array(last_state), y=np.array(y))
+
 
 def mainGame(movementInfo):
+    global FPS, draw
     score = playerIndex = loopIter = 0
     playerIndexGen = movementInfo['playerIndexGen']
     playerx, playery = int(SCREENWIDTH * 0.2), movementInfo['playery']
@@ -244,25 +296,30 @@ def mainGame(movementInfo):
     state = None
     last_action = None
     action = None
-    history = []
 
-    gamma = .6
     while True:
         for event in pygame.event.get():
             if event.type == QUIT or (event.type == KEYDOWN and event.key == K_ESCAPE):
                 pygame.quit()
                 sys.exit()
             if event.type == KEYDOWN and (event.key == K_SPACE or event.key == K_UP):
-                if playery > -2 * IMAGES['player'][0].get_height():
-                    playerVelY = playerFlapAcc
-                    playerFlapped = True
-                    SOUNDS['wing'].play()
+                #if playery > -2 * IMAGES['player'][0].get_height():
+                #    playerVelY = playerFlapAcc
+                #    playerFlapped = True
+                if FPS > 30:
+                    FPS = 30
+                    draw = True
+                else:
+                    FPS = 1000
+                    draw = False
+                SOUNDS['wing'].play()
 
         # check for crash here
         crashTest = checkCrash({'x': playerx, 'y': playery, 'index': playerIndex},
                                upperPipes, lowerPipes)
 
-        reward = 0
+        reward = 0.1
+        done = 0.0
 
         # check for score
         playerMidPos = playerx + IMAGES['player'][0].get_width() / 2
@@ -275,36 +332,29 @@ def mainGame(movementInfo):
 
         if crashTest[0]:
             reward = -5
+            done = 1.0
 
-        
-        print(state)
-        comingPipes = filter(lambda pipe: pipe['x'] > 0, lowerPipes)
-        nextPipe = list(comingPipes)[0] 
+        comingPipes = list(filter(lambda pipe: pipe['x'] > -80, lowerPipes))
+        nextPipe = comingPipes[0] 
+        nextNextPipe = comingPipes[1] 
 
         last_state = state
-        state = [playery/100., playerVelY/10., nextPipe['x']/100., nextPipe['y']/100.]
+        state = [playery/200.-1, playerVelY/10., nextPipe['x']/200. - 1, (nextPipe['y']-playery)/50., (nextNextPipe['y']-playery)/50.]
         last_action = action
-        q = model.predict(np.array([state]))
-        print("Q ", q)
+        q = model(torch.tensor([state]))
+        #print(q)
     
         action = int(q[0][0] < q[0][1])
-        if random.random() >= 0.9:
+        if random.random() >= 0.999:
             action = 1 - action
-        history.append((state, last_state, action, last_action))
+
+        if last_action is not None:
+            buffer.push(last_state, last_action, reward, state, action, done)
             
         if action:
             playerVelY = playerFlapAcc
             playerFlapped = True
 
-        if last_state is not None:
-            y = model.predict(np.array([last_state]))[0,:]
-            y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
-
-            #y = np.zeros(2)
-            #y[last_action] = reward + gamma * model.predict(np.array([state]))[0,action]
-            #q_last = model.predict(np.array([last_state]))
-            #y[1-last_action] = q_last[0, 1-last_action] 
-            model.fit(x=np.array([last_state]), y=np.array([y]))
 
         
         
@@ -359,27 +409,29 @@ def mainGame(movementInfo):
             upperPipes.pop(0)
             lowerPipes.pop(0)
 
-        # draw sprites
-        SCREEN.blit(IMAGES['background'], (0,0))
 
-        for uPipe, lPipe in zip(upperPipes, lowerPipes):
-            SCREEN.blit(IMAGES['pipe'][0], (uPipe['x'], uPipe['y']))
-            SCREEN.blit(IMAGES['pipe'][1], (lPipe['x'], lPipe['y']))
+        if draw:
+            # draw sprites
+            SCREEN.blit(IMAGES['background'], (0,0))
 
-        SCREEN.blit(IMAGES['base'], (basex, BASEY))
-        # print score so player overlaps the score
-        showScore(score)
+            for uPipe, lPipe in zip(upperPipes, lowerPipes):
+                SCREEN.blit(IMAGES['pipe'][0], (uPipe['x'], uPipe['y']))
+                SCREEN.blit(IMAGES['pipe'][1], (lPipe['x'], lPipe['y']))
 
-        # Player rotation has a threshold
-        visibleRot = playerRotThr
-        if playerRot <= playerRotThr:
-            visibleRot = playerRot
-        
-        playerSurface = pygame.transform.rotate(IMAGES['player'][playerIndex], visibleRot)
-        SCREEN.blit(playerSurface, (playerx, playery))
+            SCREEN.blit(IMAGES['base'], (basex, BASEY))
+            # print score so player overlaps the score
+            showScore(score)
 
-        pygame.display.update()
-        FPSCLOCK.tick(FPS)
+            # Player rotation has a threshold
+            visibleRot = playerRotThr
+            if playerRot <= playerRotThr:
+                visibleRot = playerRot
+            
+            playerSurface = pygame.transform.rotate(IMAGES['player'][playerIndex], visibleRot)
+            SCREEN.blit(playerSurface, (playerx, playery))
+
+            pygame.display.update()
+            FPSCLOCK.tick(FPS)
 
 
 def showGameOverScreen(crashInfo):
